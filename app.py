@@ -4,18 +4,14 @@ import uuid
 import logging
 from datetime import datetime, timezone
 
+import ssl
 import paho.mqtt.client as mqtt
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
-# MQTT broker details
-#MQTT_HOST = "aiot-garage.cloud.shiftr.io"
-#MQTT_PORT = 1883
-#MQTT_USERNAME = "aiot-garage"
-#MQTT_PASSWORD = "xbk4O60zdExseMOa"
-#MQTT_TOPIC = "sensors/max30102"
-#MQTT_KEEPALIVE = 60
-
+# ============================================================
+# MQTT broker details (HiveMQ Cloud)
+# ============================================================
 MQTT_HOST = "d87aad0df47f4a46953a7b9c93c6aada.s1.eu.hivemq.cloud"
 MQTT_PORT = 8883
 MQTT_USERNAME = "Cosmo"
@@ -24,12 +20,15 @@ MQTT_TOPIC = "sensors/max30102"
 MQTT_CLIENT_ID = "max30102-monitor-python"
 MQTT_KEEPALIVE = 60
 
-
+# ============================================================
 # MongoDB details
+# ============================================================
 MONGO_URI = "mongodb+srv://debojyotimahapatra_db_user:NM2K3z8HGe3qWJjZ@cluster0.7ejimre.mongodb.net/?appName=Cluster0"
 MONGO_DB_NAME = "cosmo_project"
-MONGO_COLLECTION_NAME = "sensor_data_latest"   # your requested collection name (with space)
+MONGO_COLLECTION_NAME = "sensor_data_latest"
 
+# If True: store each "red" sample as separate document
+# If False: store the entire batch as one document
 EXPLODE_RED_SAMPLES = False
 
 LOG_LEVEL = "INFO"
@@ -66,13 +65,11 @@ def utc_now():
 def parse_sensor_payload(payload_bytes):
     """
     Parse and validate sensor payload.
-    Expected format:
-    {
-      "t0_ms": 21866,
-      "temp_c": 27.25,
-      "ir": [...],
-      "red": [...]
-    }
+
+    EXPECTED payload (your producer example):
+    {"time":1771946976,"hr":73.4,"rmssd":78.7,"spo2":99.4,"beats":31,"ibi":[862,782,...]}
+
+    We validate types lightly and normalize into a consistent dict.
     """
     try:
         payload_str = payload_bytes.decode("utf-8")
@@ -83,36 +80,43 @@ def parse_sensor_payload(payload_bytes):
     if not isinstance(data, dict):
         raise ValueError("Payload must be a JSON object")
 
-    red = data.get("red")
-    if red is None:
-        raise ValueError("Missing 'red' field in payload")
-    if not isinstance(red, list):
-        raise ValueError("'red' must be a list")
+    # Required-ish fields
+    if "time" not in data:
+        raise ValueError("Missing 'time' field in payload")
 
-    cleaned_red = []
-    for i, v in enumerate(red):
-        if isinstance(v, (int, float)):
-            cleaned_red.append(v)
-        else:
-            logger.warning("Skipping non-numeric red[%d]=%r", i, v)
-
-    if len(cleaned_red) == 0:
-        raise ValueError("No valid numeric values in 'red' array")
-
+    # Normalize / coerce
     parsed = {
-        "t0_ms": data.get("t0_ms"),
-        "temp_c": data.get("temp_c"),
-        "red": cleaned_red,
-        "red_count": len(cleaned_red),
-        "ir_count": len(data.get("ir", [])) if isinstance(data.get("ir"), list) else None,
+        "time": int(data["time"]),
+        "hr": float(data["hr"]) if data.get("hr") is not None else None,
+        "rmssd": float(data["rmssd"]) if data.get("rmssd") is not None else None,
+        "spo2": float(data["spo2"]) if data.get("spo2") is not None else None,
+        "beats": int(data["beats"]) if data.get("beats") is not None else None,
+        "ibi": data.get("ibi", []),
         "payload_keys": list(data.keys())
     }
+
+    # Validate ibi list (optional)
+    if parsed["ibi"] is not None and not isinstance(parsed["ibi"], list):
+        raise ValueError("'ibi' must be a list if provided")
+
+    if isinstance(parsed["ibi"], list):
+        cleaned_ibi = []
+        for i, v in enumerate(parsed["ibi"]):
+            if isinstance(v, (int, float)):
+                cleaned_ibi.append(int(v))
+            else:
+                logger.warning("Skipping non-numeric ibi[%d]=%r", i, v)
+        parsed["ibi"] = cleaned_ibi
+        parsed["ibi_count"] = len(cleaned_ibi)
+    else:
+        parsed["ibi_count"] = None
+
     return parsed
 
 
 def save_batch_document(topic, parsed):
     """
-    Save one MongoDB document per MQTT batch.
+    Save one MongoDB document per MQTT message (batch).
     """
     batch_id = str(uuid.uuid4())
 
@@ -120,76 +124,102 @@ def save_batch_document(topic, parsed):
         "batch_id": batch_id,
         "topic": topic,
         "received_at_utc": utc_now(),
-        "sensor": {
-            "type": "MAX30102",
-            "t0_ms": parsed.get("t0_ms"),
-            "temp_c": parsed.get("temp_c"),
+
+        # original producer timestamp
+        "time": parsed["time"],
+        "ts_utc": datetime.fromtimestamp(parsed["time"], tz=timezone.utc),
+
+        "metrics": {
+            "hr": parsed.get("hr"),
+            "rmssd": parsed.get("rmssd"),
+            "spo2": parsed.get("spo2"),
+            "beats": parsed.get("beats"),
+            "ibi": parsed.get("ibi"),
+            "ibi_count": parsed.get("ibi_count"),
         },
-        "red": parsed["red"],             
-        "red_count": parsed["red_count"],
-        "ir_count": parsed.get("ir_count"), 
+
         "payload_keys": parsed.get("payload_keys"),
         "ingestion": {
             "source": "mqtt",
-            "version": 1
+            "version": 2,
+            "client_id": MQTT_CLIENT_ID,
         }
     }
 
     result = collection.insert_one(doc)
     logger.info(
-        "Saved batch document: _id=%s batch_id=%s red_count=%d",
-        result.inserted_id, batch_id, parsed["red_count"]
+        "Saved batch document: _id=%s batch_id=%s time=%s hr=%s spo2=%s",
+        result.inserted_id, batch_id, parsed["time"], parsed.get("hr"), parsed.get("spo2")
     )
 
 
-def save_exploded_red_documents(topic, parsed):
+def save_exploded_ibi_documents(topic, parsed):
     """
-    Save one MongoDB document per red sample.
-    Optional mode for time-series querying.
+    Save one MongoDB document per IBI sample (optional mode).
+    Useful if you want time-series querying on each ibi value.
+
+    Note: Your payload has ibi list; we "explode" that list.
     """
     batch_id = str(uuid.uuid4())
     now = utc_now()
     docs = []
 
-    for idx, value in enumerate(parsed["red"]):
+    ibi_list = parsed.get("ibi") or []
+    for idx, value in enumerate(ibi_list):
         docs.append({
             "batch_id": batch_id,
             "topic": topic,
             "received_at_utc": now,
+            "time": parsed["time"],
+            "ts_utc": datetime.fromtimestamp(parsed["time"], tz=timezone.utc),
+
             "sample_index": idx,
-            "red_value": value,
-            "sensor": {
-                "type": "MAX30102",
-                "t0_ms": parsed.get("t0_ms"),
-                "temp_c": parsed.get("temp_c"),
+            "ibi_value": int(value),
+
+            "metrics": {
+                "hr": parsed.get("hr"),
+                "rmssd": parsed.get("rmssd"),
+                "spo2": parsed.get("spo2"),
+                "beats": parsed.get("beats"),
             },
-            "red_count_in_batch": parsed["red_count"],
+
+            "ibi_count_in_batch": parsed.get("ibi_count"),
+            "payload_keys": parsed.get("payload_keys"),
+
             "ingestion": {
                 "source": "mqtt",
-                "version": 1
+                "version": 2,
+                "client_id": MQTT_CLIENT_ID,
             }
         })
 
     if docs:
         result = collection.insert_many(docs, ordered=False)
-        logger.info("Saved %d exploded RED docs for batch_id=%s", len(result.inserted_ids), batch_id)
+        logger.info("Saved %d exploded IBI docs for batch_id=%s", len(result.inserted_ids), batch_id)
+    else:
+        logger.info("No IBI samples to explode; saving batch doc instead.")
+        save_batch_document(topic, parsed)
 
 
 # ============================================================
-# MQTT callbacks
+# MQTT callbacks (Callback API VERSION2 compatible)
 # ============================================================
-def on_connect(client, userdata, flags, rc, properties=None):
-    if rc == 0:
+def on_connect(client, userdata, flags, reason_code, properties):
+    # reason_code is a ReasonCodes object in v2
+    if reason_code == mqtt.ReasonCodes.SUCCESS:
         logger.info("Connected to MQTT broker %s:%d", MQTT_HOST, MQTT_PORT)
         client.subscribe(MQTT_TOPIC, qos=0)
         logger.info("Subscribed to topic: %s", MQTT_TOPIC)
     else:
-        logger.error("MQTT connect failed with rc=%s", rc)
+        logger.error("MQTT connect failed with reason_code=%s", reason_code)
 
 
-def on_disconnect(client, userdata, rc, properties=None):
-    if rc != 0:
-        logger.warning("Unexpected MQTT disconnect (rc=%s). Auto-reconnect will retry.", rc)
+def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
+    if reason_code != mqtt.ReasonCodes.SUCCESS:
+        logger.warning(
+            "Unexpected MQTT disconnect (reason_code=%s). Auto-reconnect will retry.",
+            reason_code
+        )
     else:
         logger.info("MQTT disconnected cleanly.")
 
@@ -201,7 +231,8 @@ def on_message(client, userdata, msg):
         parsed = parse_sensor_payload(msg.payload)
 
         if EXPLODE_RED_SAMPLES:
-            save_exploded_red_documents(msg.topic, parsed)
+            # For your new payload, "explode" means explode IBI samples
+            save_exploded_ibi_documents(msg.topic, parsed)
         else:
             save_batch_document(msg.topic, parsed)
 
@@ -215,10 +246,21 @@ def on_message(client, userdata, msg):
 
 def build_mqtt_client():
     client = mqtt.Client(
-        mqtt.CallbackAPIVersion.VERSION2,
-        client_id=f"max30102-ingestor-{uuid.uuid4().hex[:8]}"
+        callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+        client_id=MQTT_CLIENT_ID
     )
+
     client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+
+    # TLS required for HiveMQ Cloud (port 8883)
+    client.tls_set(
+        ca_certs=None,                 # use system CA store
+        certfile=None,
+        keyfile=None,
+        cert_reqs=ssl.CERT_REQUIRED,
+        tls_version=ssl.PROTOCOL_TLS_CLIENT,
+    )
+    client.tls_insecure_set(False)
 
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
