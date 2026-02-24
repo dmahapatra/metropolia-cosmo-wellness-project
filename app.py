@@ -9,17 +9,26 @@ from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
 # MQTT broker details
-MQTT_HOST = "aiot-garage.cloud.shiftr.io"
-MQTT_PORT = 1883
-MQTT_USERNAME = "aiot-garage"
-MQTT_PASSWORD = "xbk4O60zdExseMOa"
+#MQTT_HOST = "aiot-garage.cloud.shiftr.io"
+#MQTT_PORT = 1883
+#MQTT_USERNAME = "aiot-garage"
+#MQTT_PASSWORD = "xbk4O60zdExseMOa"
+#MQTT_TOPIC = "sensors/max30102"
+#MQTT_KEEPALIVE = 60
+
+MQTT_HOST = "d87aad0df47f4a46953a7b9c93c6aada.s1.eu.hivemq.cloud"
+MQTT_PORT = 8883
+MQTT_USERNAME = "Cosmo"
+MQTT_PASSWORD = "jO^HuAm4AzFLPS"
 MQTT_TOPIC = "sensors/max30102"
+MQTT_CLIENT_ID = "max30102-monitor-python"
 MQTT_KEEPALIVE = 60
+
 
 # MongoDB details
 MONGO_URI = "mongodb+srv://debojyotimahapatra_db_user:NM2K3z8HGe3qWJjZ@cluster0.7ejimre.mongodb.net/?appName=Cluster0"
 MONGO_DB_NAME = "cosmo_project"
-MONGO_COLLECTION_NAME = "sensor_data"   # your requested collection name (with space)
+MONGO_COLLECTION_NAME = "sensor_data_latest"   # your requested collection name (with space)
 
 EXPLODE_RED_SAMPLES = False
 
