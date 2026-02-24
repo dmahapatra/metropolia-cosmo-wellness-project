@@ -204,22 +204,22 @@ def save_exploded_ibi_documents(topic, parsed):
 # ============================================================
 # MQTT callbacks (Callback API VERSION2 compatible)
 # ============================================================
-def on_connect(client, userdata, flags, reason_code, properties):
-    # reason_code is a ReasonCodes object in v2
-    if reason_code == mqtt.ReasonCodes.SUCCESS:
+# ============================================================
+# MQTT callbacks (Callback API VERSION1 - stable)
+# ============================================================
+def on_connect(client, userdata, flags, rc):
+    # rc == 0 means success
+    if rc == 0:
         logger.info("Connected to MQTT broker %s:%d", MQTT_HOST, MQTT_PORT)
         client.subscribe(MQTT_TOPIC, qos=0)
         logger.info("Subscribed to topic: %s", MQTT_TOPIC)
     else:
-        logger.error("MQTT connect failed with reason_code=%s", reason_code)
+        logger.error("MQTT connect failed with rc=%s", rc)
 
 
-def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
-    if reason_code != mqtt.ReasonCodes.SUCCESS:
-        logger.warning(
-            "Unexpected MQTT disconnect (reason_code=%s). Auto-reconnect will retry.",
-            reason_code
-        )
+def on_disconnect(client, userdata, rc):
+    if rc != 0:
+        logger.warning("Unexpected MQTT disconnect (rc=%s). Auto-reconnect will retry.", rc)
     else:
         logger.info("MQTT disconnected cleanly.")
 
@@ -231,7 +231,6 @@ def on_message(client, userdata, msg):
         parsed = parse_sensor_payload(msg.payload)
 
         if EXPLODE_RED_SAMPLES:
-            # For your new payload, "explode" means explode IBI samples
             save_exploded_ibi_documents(msg.topic, parsed)
         else:
             save_batch_document(msg.topic, parsed)
@@ -244,6 +243,25 @@ def on_message(client, userdata, msg):
         logger.exception("Unexpected processing error: %s", e)
 
 
+def build_mqtt_client():
+    client = mqtt.Client(
+        client_id=MQTT_CLIENT_ID,
+        protocol=mqtt.MQTTv311,
+        callback_api_version=mqtt.CallbackAPIVersion.VERSION1
+    )
+
+    client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+
+    # TLS required for HiveMQ Cloud (port 8883)
+    client.tls_set()                 # uses system CA store
+    client.tls_insecure_set(False)
+
+    client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
+    client.on_message = on_message
+
+    client.reconnect_delay_set(min_delay=1, max_delay=30)
+    return client
 def build_mqtt_client():
     client = mqtt.Client(
         callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
