@@ -1,3 +1,5 @@
+# app.py
+import os
 import ssl
 import json
 import time
@@ -10,34 +12,34 @@ from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
 # ============================================================
-# MQTT broker details
+# MQTT (HiveMQ Cloud) - read from env first (recommended for Heroku)
 # ============================================================
-MQTT_HOST = "aiot-garage.cloud.shiftr.io"
-MQTT_PORT = 1883
-MQTT_USERNAME = "aiot-garage"
-MQTT_PASSWORD = "xbk4O60zdExseMOa"
-MQTT_TOPIC = "sensors/max30102"
-MQTT_KEEPALIVE = 60
+MQTT_HOST = os.getenv("MQTT_HOST", "d87aad0df47f4a46953a7b9c93c6aada.s1.eu.hivemq.cloud")
+MQTT_PORT = int(os.getenv("MQTT_PORT", "8883"))
+MQTT_USERNAME = os.getenv("MQTT_USERNAME", "Cosmo")
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "jO^HuAm4AzFLPS")
+MQTT_TOPIC = os.getenv("MQTT_TOPIC", "sensors/max30102")
+MQTT_CLIENT_ID = os.getenv("MQTT_CLIENT_ID", "max30102-monitor-python")
+MQTT_KEEPALIVE = int(os.getenv("MQTT_KEEPALIVE", "60"))
 
 # ============================================================
-# MongoDB details
+# MongoDB - read from env first (recommended for Heroku)
 # ============================================================
-MONGO_URI = "mongodb+srv://debojyotimahapatra_db_user:NM2K3z8HGe3qWJjZ@cluster0.7ejimre.mongodb.net/?appName=Cluster0"
-MONGO_DB_NAME = "cosmo_project"
-MONGO_COLLECTION_NAME = "sensor_data"
+MONGO_URI = os.getenv(
+    "MONGO_URI",
+    "mongodb+srv://debojyotimahapatra_db_user:NM2K3z8HGe3qWJjZ@cluster0.7ejimre.mongodb.net/?appName=Cluster0",
+)
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "cosmo_project")
+MONGO_COLLECTION_NAME = os.getenv("MONGO_COLLECTION_NAME", "sensor_data_latest")
 
-# If True: store each IBI sample as separate document
-# If False: store the whole message as a single document
-EXPLODE_IBI_SAMPLES = False
-
-LOG_LEVEL = "INFO"
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # ============================================================
 # Logging
 # ============================================================
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format="%(asctime)s %(levelname)s %(message)s"
+    format="%(asctime)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -48,36 +50,27 @@ mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=10000)
 db = mongo_client[MONGO_DB_NAME]
 collection = db[MONGO_COLLECTION_NAME]
 
-# Create helpful indexes (safe to call repeatedly)
+# Helpful indexes (safe to call repeatedly)
 try:
     collection.create_index("received_at_utc")
     collection.create_index("topic")
-    collection.create_index("batch_id")
-    collection.create_index("time")  # producer timestamp
+    collection.create_index("message_id")
+    collection.create_index("sensor_time_epoch")
 except PyMongoError as e:
     logger.warning("Could not create indexes: %s", e)
 
 
-def utc_now():
+def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def parse_sensor_payload(payload_bytes):
+def parse_sensor_payload(payload_bytes: bytes) -> dict:
     """
-    Parse and validate sensor payload.
-
-    Expected format (from sensor):
-    {
-      "time": 1771946976,
-      "hr": 73.4,
-      "rmssd": 78.7,
-      "spo2": 99.4,
-      "beats": 31,
-      "ibi": [862, 782, 791, ...]
-    }
+    Expected payload from sensor:
+    {"time":1771946976,"hr":73.4,"rmssd":78.7,"spo2":99.4,"beats":31,"ibi":[862,782,...]}
     """
     try:
-        payload_str = payload_bytes.decode("utf-8")
+        payload_str = payload_bytes.decode("utf-8", errors="strict")
         data = json.loads(payload_str)
     except Exception as e:
         raise ValueError(f"Invalid JSON payload: {e}")
@@ -85,156 +78,122 @@ def parse_sensor_payload(payload_bytes):
     if not isinstance(data, dict):
         raise ValueError("Payload must be a JSON object")
 
-    if "time" not in data:
-        raise ValueError("Missing 'time' field in payload")
+    required = ["time", "hr", "rmssd", "spo2", "beats", "ibi"]
+    missing = [k for k in required if k not in data]
+    if missing:
+        raise ValueError(f"Missing required field(s): {missing}")
 
-    # Basic type coercion + validation
-    parsed = {
-        "time": int(data["time"]),
-        "hr": float(data["hr"]) if data.get("hr") is not None else None,
-        "rmssd": float(data["rmssd"]) if data.get("rmssd") is not None else None,
-        "spo2": float(data["spo2"]) if data.get("spo2") is not None else None,
-        "beats": int(data["beats"]) if data.get("beats") is not None else None,
-        "ibi": data.get("ibi", []),
-        "payload_keys": list(data.keys())
-    }
+    # Validate types + clean ibi
+    t = data["time"]
+    if not isinstance(t, (int, float)):
+        raise ValueError("'time' must be a number (epoch seconds)")
 
-    if parsed["ibi"] is None:
-        parsed["ibi"] = []
+    hr = data["hr"]
+    rmssd = data["rmssd"]
+    spo2 = data["spo2"]
+    beats = data["beats"]
+    ibi = data["ibi"]
 
-    if not isinstance(parsed["ibi"], list):
+    if not isinstance(hr, (int, float)):
+        raise ValueError("'hr' must be a number")
+    if not isinstance(rmssd, (int, float)):
+        raise ValueError("'rmssd' must be a number")
+    if not isinstance(spo2, (int, float)):
+        raise ValueError("'spo2' must be a number")
+    if not isinstance(beats, int):
+        raise ValueError("'beats' must be an integer")
+    if not isinstance(ibi, list):
         raise ValueError("'ibi' must be a list")
 
     cleaned_ibi = []
-    for i, v in enumerate(parsed["ibi"]):
+    for i, v in enumerate(ibi):
         if isinstance(v, (int, float)):
-            cleaned_ibi.append(int(v))
+            cleaned_ibi.append(float(v))
         else:
             logger.warning("Skipping non-numeric ibi[%d]=%r", i, v)
 
-    parsed["ibi"] = cleaned_ibi
-    parsed["ibi_count"] = len(cleaned_ibi)
+    if len(cleaned_ibi) == 0:
+        raise ValueError("No valid numeric values in 'ibi' array")
 
-    return parsed
+    sensor_time_epoch = int(t)
+    sensor_time_utc = datetime.fromtimestamp(sensor_time_epoch, tz=timezone.utc)
+
+    return {
+        "sensor_time_epoch": sensor_time_epoch,
+        "sensor_time_utc": sensor_time_utc,
+        "hr": float(hr),
+        "rmssd": float(rmssd),
+        "spo2": float(spo2),
+        "beats": int(beats),
+        "ibi": cleaned_ibi,
+        "ibi_count": len(cleaned_ibi),
+        "payload_keys": list(data.keys()),
+        "raw": data,
+    }
 
 
-def save_batch_document(topic, parsed):
-    """
-    Save one MongoDB document per MQTT message.
-    """
-    batch_id = str(uuid.uuid4())
+def save_document(topic: str, parsed: dict) -> None:
+    message_id = str(uuid.uuid4())
 
     doc = {
-        "batch_id": batch_id,
+        "message_id": message_id,
         "topic": topic,
         "received_at_utc": utc_now(),
-
-        # original device timestamp + derived UTC datetime
-        "time": parsed["time"],
-        "ts_utc": datetime.fromtimestamp(parsed["time"], tz=timezone.utc),
-
+        "sensor_time_epoch": parsed["sensor_time_epoch"],
+        "sensor_time_utc": parsed["sensor_time_utc"],
         "metrics": {
-            "hr": parsed.get("hr"),
-            "rmssd": parsed.get("rmssd"),
-            "spo2": parsed.get("spo2"),
-            "beats": parsed.get("beats"),
-            "ibi": parsed.get("ibi"),
-            "ibi_count": parsed.get("ibi_count"),
+            "hr": parsed["hr"],
+            "rmssd": parsed["rmssd"],
+            "spo2": parsed["spo2"],
+            "beats": parsed["beats"],
         },
-
+        "ibi": parsed["ibi"],
+        "ibi_count": parsed["ibi_count"],
         "payload_keys": parsed.get("payload_keys"),
         "ingestion": {
             "source": "mqtt",
-            "version": 2
-        }
+            "broker": "hivemq_cloud",
+            "version": 1,
+        },
     }
 
     result = collection.insert_one(doc)
     logger.info(
-        "Saved batch document: _id=%s batch_id=%s time=%s hr=%s spo2=%s ibi_count=%s",
+        "Saved sensor doc: _id=%s message_id=%s hr=%.2f spo2=%.2f rmssd=%.2f ibi_count=%d",
         result.inserted_id,
-        batch_id,
-        parsed["time"],
-        parsed.get("hr"),
-        parsed.get("spo2"),
-        parsed.get("ibi_count"),
+        message_id,
+        parsed["hr"],
+        parsed["spo2"],
+        parsed["rmssd"],
+        parsed["ibi_count"],
     )
 
 
-def save_exploded_ibi_documents(topic, parsed):
-    """
-    Save one MongoDB document per IBI sample.
-    Optional mode for time-series querying on each IBI value.
-    """
-    batch_id = str(uuid.uuid4())
-    now = utc_now()
-
-    docs = []
-    for idx, value in enumerate(parsed["ibi"]):
-        docs.append({
-            "batch_id": batch_id,
-            "topic": topic,
-            "received_at_utc": now,
-            "time": parsed["time"],
-            "ts_utc": datetime.fromtimestamp(parsed["time"], tz=timezone.utc),
-
-            "sample_index": idx,
-            "ibi_value": int(value),
-
-            "metrics": {
-                "hr": parsed.get("hr"),
-                "rmssd": parsed.get("rmssd"),
-                "spo2": parsed.get("spo2"),
-                "beats": parsed.get("beats"),
-            },
-
-            "ibi_count_in_batch": parsed.get("ibi_count"),
-            "payload_keys": parsed.get("payload_keys"),
-
-            "ingestion": {
-                "source": "mqtt",
-                "version": 2
-            }
-        })
-
-    if docs:
-        result = collection.insert_many(docs, ordered=False)
-        logger.info("Saved %d exploded IBI docs for batch_id=%s", len(result.inserted_ids), batch_id)
-    else:
-        logger.info("No IBI samples to explode; saving batch doc instead.")
-        save_batch_document(topic, parsed)
-
-
 # ============================================================
-# MQTT callbacks (VERSION2 signatures)
+# MQTT callbacks (use Callback API v1 to avoid signature mismatch)
 # ============================================================
-def on_connect(client, userdata, flags, reason_code, properties):
-    if getattr(reason_code, "value", reason_code) == 0:
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
         logger.info("Connected to MQTT broker %s:%d", MQTT_HOST, MQTT_PORT)
         client.subscribe(MQTT_TOPIC, qos=0)
         logger.info("Subscribed to topic: %s", MQTT_TOPIC)
     else:
-        logger.error("MQTT connect failed with reason_code=%s", reason_code)
+        logger.error("MQTT connect failed with rc=%s", rc)
 
 
-def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
-    if getattr(reason_code, "value", reason_code) != 0:
-        logger.warning("Unexpected MQTT disconnect (reason_code=%s). Auto-reconnect will retry.", reason_code)
+def on_disconnect(client, userdata, rc):
+    if rc != 0:
+        logger.warning("Unexpected MQTT disconnect (rc=%s). Auto-reconnect will retry.", rc)
     else:
         logger.info("MQTT disconnected cleanly.")
 
 
 def on_message(client, userdata, msg):
-    logger.info("Message received on topic=%s payload_size=%d", msg.topic, len(msg.payload))
+    logger.info("Message received topic=%s payload_size=%d", msg.topic, len(msg.payload))
 
     try:
         parsed = parse_sensor_payload(msg.payload)
-
-        if EXPLODE_IBI_SAMPLES:
-            save_exploded_ibi_documents(msg.topic, parsed)
-        else:
-            save_batch_document(msg.topic, parsed)
-
+        save_document(msg.topic, parsed)
     except ValueError as ve:
         logger.error("Payload validation error: %s", ve)
     except PyMongoError as me:
@@ -243,21 +202,22 @@ def on_message(client, userdata, msg):
         logger.exception("Unexpected processing error: %s", e)
 
 
-def build_mqtt_client():
+def build_mqtt_client() -> mqtt.Client:
+    # IMPORTANT: force Callback API v1 so callback signatures match (no ReasonCodes / extra args issues)
     client = mqtt.Client(
-        callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-        client_id=f"max30102-ingestor-{uuid.uuid4().hex[:8]}",
-        protocol=mqtt.MQTTv311
+        client_id=MQTT_CLIENT_ID,
+        protocol=mqtt.MQTTv311,
+        transport="tcp",
+        callback_api_version=mqtt.CallbackAPIVersion.VERSION1,
     )
+
     client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
 
-    # TLS (as requested)
+    # TLS for HiveMQ Cloud (8883)
+    # You requested CERT_NONE (no server cert verification). Works, but not recommended for production.
     client.tls_set(
-        ca_certs=None,
-        certfile=None,
-        keyfile=None,
         cert_reqs=ssl.CERT_NONE,
-        tls_version=ssl.PROTOCOL_TLS_CLIENT
+        tls_version=ssl.PROTOCOL_TLS_CLIENT,
     )
     client.tls_insecure_set(True)
 
@@ -265,6 +225,7 @@ def build_mqtt_client():
     client.on_disconnect = on_disconnect
     client.on_message = on_message
 
+    # Auto reconnect backoff
     client.reconnect_delay_set(min_delay=1, max_delay=30)
     return client
 
