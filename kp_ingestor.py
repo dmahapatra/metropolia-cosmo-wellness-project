@@ -18,7 +18,7 @@ GFZ_KP_API_URL = "https://kp.gfz.de/app/json/"
 # What to fetch
 KP_INDEX = "Kp"          # e.g., Kp, ap, Ap, Cp, C9, Hp30, Hp60
 ONLY_DEFINITIVE = False  # True -> add status=def (only definitive values, if supported)
-LOOKBACK_HOURS = 0      # fetch last 24h on each poll (safe for missed runs)
+LOOKBACK_HOURS = 6      # fetch last 24h on each poll (safe for missed runs)
 POLL_INTERVAL_SECONDS = 10  # 24 hours
 
 # MongoDB details
