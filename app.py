@@ -14,20 +14,20 @@ from pymongo.errors import PyMongoError
 # ============================================================
 # MQTT (HiveMQ Cloud) - read from env first (recommended for Heroku)
 # ============================================================
-MQTT_HOST = os.getenv("MQTT_HOST", "d87aad0df47f4a46953a7b9c93c6aada.s1.eu.hivemq.cloud")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "8883"))
-MQTT_USERNAME = os.getenv("MQTT_USERNAME", "Cosmo")
-MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "jO^HuAm4AzFLPS")
-MQTT_TOPIC = os.getenv("MQTT_TOPIC", "sensors/max30102")
-MQTT_CLIENT_ID = os.getenv("MQTT_CLIENT_ID", "max30102-monitor-python")
-MQTT_KEEPALIVE = int(os.getenv("MQTT_KEEPALIVE", "60"))
+MQTT_HOST = os.getenv("MQTT_HOST", "xxxx")
+MQTT_PORT = int(os.getenv("MQTT_PORT", "xxxx"))
+MQTT_USERNAME = os.getenv("MQTT_USERNAME", "xxxx")
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "xxxxx")
+MQTT_TOPIC = os.getenv("MQTT_TOPIC", "xxxxx")
+MQTT_CLIENT_ID = os.getenv("MQTT_CLIENT_ID", "xxxxxn")
+MQTT_KEEPALIVE = int(os.getenv("MQTT_KEEPALIVE", "xx"))
 
 # ============================================================
 # MongoDB - read from env first (recommended for Heroku)
 # ============================================================
 MONGO_URI = os.getenv(
     "MONGO_URI",
-    "mongodb+srv://debojyotimahapatra_db_user:NM2K3z8HGe3qWJjZ@cluster0.7ejimre.mongodb.net/?appName=Cluster0",
+    "xxxxx",
 )
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "cosmo_project")
 MONGO_COLLECTION_NAME = os.getenv("MONGO_COLLECTION_NAME", "sensor_data_latest")

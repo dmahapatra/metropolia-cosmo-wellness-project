@@ -22,7 +22,7 @@ LOOKBACK_HOURS = 6      # fetch last 24h on each poll (safe for missed runs)
 POLL_INTERVAL_SECONDS = 10  # 24 hours
 
 # MongoDB details
-MONGO_URI = "mongodb+srv://debojyotimahapatra_db_user:NM2K3z8HGe3qWJjZ@cluster0.7ejimre.mongodb.net/?appName=Cluster0"
+MONGO_URI = "xxxx"
 MONGO_DB_NAME = "cosmo_project"
 MONGO_COLLECTION_NAME = "kp_data"
 
